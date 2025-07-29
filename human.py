@@ -1,19 +1,28 @@
-import pygame
+import pygame, numpy as np
 import gymnasium as gym
 import gym_pusht
-from gymnasium.utils.play import play
 
-# 创建环境（human 模式会弹 pygame 窗口）
+pygame.init()
 env = gym.make("gym_pusht/PushT-v0", render_mode="human")
+obs, info = env.reset()
 
-# 定义键盘→动作 的映射
-# 这里 action_space 是 Box([-1,-1], [1,1])，对应推力向量 (x, y)
-keys_to_action = {
-    (pygame.K_LEFT,):  (-1.0,  0.0),
-    (pygame.K_RIGHT,): ( 1.0,  0.0),
-    (pygame.K_UP,):    ( 0.0,  1.0),
-    (pygame.K_DOWN,):  ( 0.0, -1.0),
-}
+running = True
+while running:
+    action = np.zeros(2, dtype=np.float32)
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT:
+            running = False
+        elif e.type == pygame.KEYDOWN:
+            if e.key == pygame.K_LEFT:  action[0] = -1
+            if e.key == pygame.K_RIGHT: action[0] = +1
+            if e.key == pygame.K_UP:    action[1] = +1
+            if e.key == pygame.K_DOWN:  action[1] = -1
 
-# 打开人机交互界面
-play(env, keys_to_action=keys_to_action, zoom=4)
+    obs, r, done, trunc, info = env.step(action)
+    env.render()
+
+    if done or trunc:
+        obs, info = env.reset()
+
+env.close()
+pygame.quit()
