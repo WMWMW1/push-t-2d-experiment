@@ -1,0 +1,63 @@
+python -m lerobot.scripts.train \
+  --output_dir outputs/my_dp_pusht2 \
+  --dataset.repo_id lerobot/pusht \
+  --env.type pusht \
+  --policy.type diffusion \
+  --steps 10000 \
+  --batch_size 512 \
+  --policy.device cuda \
+  --wandb.enable false \
+  --policy.push_to_hub false
+
+
+python -m lerobot.scripts.train \
+  --output_dir=outputs/my_dp_pusht2 \
+  --dataset.repo_id=lerobot/pusht \
+  --env.type=pusht \
+  --policy.type=diffusion \
+  --steps=10000 \
+  --batch_size=512 \
+  --policy.device=cuda \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --eval_freq=1000 \
+  --save_freq=1000
+
+
+
+python -m lerobot.scripts.train \
+  --output_dir=outputs/my_dp_pusht \
+  --dataset.repo_id=lerobot/pusht \
+  --env.type=pusht \
+  --policy.type=diffusion \
+  --steps=200000 \
+  --batch_size=64 \
+  --policy.device=cuda \
+  --wandb.enable=false \
+  --policy.push_to_hub=false \
+  --resume=true \
+ --config_path=/outputs/my_dp_pusht/train_config.json
+
+
+
+python -m lerobot.scripts.train   --output_dir        outputs/my_dp_pusht   --dataset.repo_id   lerobot/pusht   --env.type          pusht   --policy.type       diffusion   --steps             200000   --batch_size        64   --policy.device     cuda   --wandb.enable      false   --policy.push_to_hub false   --resume true
+
+python -m lerobot.scripts.eval \
+  --policy.path=outputs/my_dp_pusht/checkpoints/020000/pretrained_model \
+  --env.type=pusht \
+  --eval.batch_size=10 \
+--policy.device=cuda\
+  --eval.n_episodes=100 \
+
+
+
+eval代码
+
+
+python -m lerobot.scripts.eval \
+  --policy.path=outputs/my_dp_pusht2/checkpoints/005000/pretrained_model \
+  --env.type=pusht \
+  --eval.batch_size=10 \
+    --policy.device=cuda\
+  --eval.n_episodes=100 \
+
