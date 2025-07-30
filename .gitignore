@@ -1,3 +1,4 @@
+**/bc_experiments/**/eval_videos/
 
-/bc_experiments
+*.pth
 lerobot
