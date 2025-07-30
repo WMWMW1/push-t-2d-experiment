@@ -1,76 +1,96 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train_bc_pusht_norm.py —— ResNet-18 + 4-Layer Transformer
-仅改 3 处：动作/state 归一化、batch_size=64、MSELoss
+train_bc_pusht_norm_ds.py —— ResNet-18 + 4-Layer Transformer
+数据改为直接使用 LeRobotDataset（含视频解码），其余设置与
+train_bc_pusht_norm.py 保持一致：
+  • 动作 / state 归一化到 [-1,1]
+  • batch_size = 64
+  • 损失函数 = MSELoss
 """
-import torch, torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from torchvision import transforms
-from datasets import load_dataset
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision.transforms.v2 import ToTensor, Normalize, Compose
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from tqdm import tqdm
-import numpy as np
-from bc_model import ResNetStateFusionTrans
 
-# ---------- 1) 载入数据 ----------
-ds = load_dataset("lerobot/pusht_image", split="train")
-imgs    = np.stack(ds["observation.image"])
-states  = np.stack(ds["observation.state"]).astype("f")    # (N,2)
-actions = np.stack(ds["action"]).astype("f")               # (N,2)
+from bc_model import ResNetStateFusionTrans   # ← 你的模型实现
 
-# ---------- 2) 归一化助手 ----------
-XY_MAX = 96.0   # Push-T 平面尺寸
-def normalize(xy):      # [0,96] -> [-1,1]
-    return (xy / XY_MAX) * 2.0 - 1.0
-def denormalize(xy_n):  # [-1,1] -> [0,96]
-    return (xy_n + 1.0) / 2.0 * XY_MAX
-
-states_n  = normalize(states)
-actions_n = normalize(actions)
-
-# ---------- 3) TensorDataset ----------
-to_tensor = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.485,0.456,0.406),
-                         (0.229,0.224,0.225)),
+# ───────────── 1) 数据集 ─────────────
+ROOT_DIR = "./lerobot_pusht"   # 已下载目录，也可随意指定
+TRANSFORMS = Compose([
+    ToTensor(),                                    # (H,W,C)→(C,H,W), 范围 [0,1]
+    Normalize((0.485, 0.456, 0.406),               # ImageNet 归一化
+              (0.229, 0.224, 0.225))
 ])
-img_t    = torch.stack([to_tensor(im) for im in imgs])
-state_t  = torch.from_numpy(states_n)
-action_t = torch.from_numpy(actions_n)
-dataset  = TensorDataset(img_t, state_t, action_t)
 
-# ---------- 4) DataLoader ----------
-BATCH_SIZE = 64                    # ★ 改动 2
-loader = DataLoader(dataset,
-                    batch_size=BATCH_SIZE,
-                    shuffle=True,
-                    num_workers=4,
-                    drop_last=True)
+ds_raw = LeRobotDataset(
+    repo_id="lerobot/pusht",
+    root=ROOT_DIR,
+    download_videos=True,        # 需要视频才能 decode image
+    video_backend="pyav",
+    image_transforms=TRANSFORMS, # 直接在内部做 ToTensor+Norm
+)
 
-# ---------- 5) 模型 ----------
+# ───────────── 2) 归一化助手 ─────────────
+XY_MAX = 512.0
+def normalize(xy):           
+    return (torch.as_tensor(xy, dtype=torch.float32) / XY_MAX) * 2.0 - 1.0
+
+# ───────────── 3) Dataset 包装器 ─────────────
+class PushTDataset(torch.utils.data.Dataset):
+    def __init__(self, ds_raw):
+        self.ds = ds_raw
+    def __len__(self): return len(self.ds)
+    def __getitem__(self, idx):
+        item = self.ds[idx]
+        img     = item["observation.image"]        # 已是 Tensor(C,H,W)
+        state   = normalize(item["observation.state"])
+        action  = normalize(item["action"])
+        return img, state, action
+
+dataset = PushTDataset(ds_raw)
+
+# ───────────── 4) DataLoader ─────────────
+BATCH_SIZE = 64
+loader = DataLoader(
+    dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=4,
+    drop_last=True,
+    pin_memory=True,
+)
+
+# ───────────── 5) 模型 ─────────────
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = ResNetStateFusionTrans().to(device)
 
-# 保持你原先“全训练”策略：不冻结任何层
-for p in model.parameters():
-    p.requires_grad = True
+# ───────────── 6) 优化器 & 损失 ─────────────
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+criterion = nn.MSELoss()
 
-# ---------- 6) 优化器 & 损失 ----------
-optim = torch.optim.AdamW(model.parameters(),
-                          lr=1e-4, weight_decay=1e-4)
-criterion = nn.MSELoss()            # ★ 改动 3
-
-# ---------- 7) 训练 ----------
-EPOCHS = 100
+# ───────────── 7) 训练循环 ─────────────
+EPOCHS = 10
 for ep in range(1, EPOCHS + 1):
-    model.train();  total = 0.0
-    for img, st, act in tqdm(loader, desc=f"Ep{ep}/{EPOCHS}"):
-        img, st, act = img.to(device), st.to(device), act.to(device)
-        pred = model(img, st)
-        loss = criterion(pred, act)
-        optim.zero_grad(); loss.backward(); optim.step()
-        total += loss.item() * img.size(0)
-    print(f"[Epoch {ep:03d}]  avg_MSE={total/len(dataset):.4f}")
+    model.train()
+    running_loss = 0.0
+    for imgs, states, acts in tqdm(loader, desc=f"Ep {ep}/{EPOCHS}", ncols=100):
+        imgs, states, acts = imgs.to(device), states.to(device), acts.to(device)
 
+        preds = model(imgs, states)
+        loss  = criterion(preds, acts)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item() * imgs.size(0)
+
+    avg = running_loss / len(dataset)
+    print(f"[Epoch {ep:03d}]  avg_MSE={avg:.4f}")
+
+# ───────────── 8) 保存权重 ─────────────
 torch.save(model.state_dict(), "bc_resnet_trans_norm.pt")
 print("✓ saved → bc_resnet_trans_norm.pt")

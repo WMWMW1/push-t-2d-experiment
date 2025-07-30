@@ -13,8 +13,7 @@ class ResNetStateFusionTrans(nn.Module):
         super().__init__()
         # -- 冻结 ResNet-18 backbone --
         res = models.resnet18(weights="IMAGENET1K_V1")
-        for p in res.parameters():
-            p.requires_grad = False
+
         self.img_encoder = nn.Sequential(*list(res.children())[:-1])  # (B,512,1,1)
         self.img_proj = nn.Linear(512, d_model)
 
