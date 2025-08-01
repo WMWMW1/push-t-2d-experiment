@@ -1,115 +1,82 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-eval_bc_pusht_norm_chunk_parallel.py — 并行评测 action-chunking 策略，
-按 10Hz（0.1s）控制频率执行动作，评测前清空输出文件夹
-"""
-import os
-import shutil
-import time
+# eval_bc_pusht.py — 并行评测（分类 head），修复 state 归一化错误
+import shutil, time
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-import gymnasium as gym
-import gym_pusht
-import torch
-import imageio.v3 as iio
-import numpy as np
+import gymnasium as gym, gym_pusht
+import torch, imageio.v3 as iio
 from gymnasium.wrappers import TimeLimit
 from torchvision import transforms
 
-from bc_model import ResNetStateFusionTrans
+from bc_model import ResNetStateFusionTrans, NUM_BINS
 
-# ---- 常量 & 函数 ----
-CHUNK_SIZE   = 8
-XY_MAX       = 512.0
-CTRL_PERIOD  = 0.1   # 10 Hz
+CHUNK    = 8
+XY_MAX   = 512.0
+N_EP     = 30
+SAVE     = Path("eval_videos_class")
+MODEL    = "bc_resnet_trans_chunk_cls.pt"
 
-# 并行评测轮数
-N_EP         = 14
-SAVE_DIR     = Path("eval_videos_chunk")
-MODEL_PATH   = "bc_resnet_trans_chunk.pt"
+to_tensor = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.485,0.456,0.406),
+                         (0.229,0.224,0.225))
+])
 
-def normalize(xy):
-    return (xy / XY_MAX) * 2.0 - 1.0
-
-def denormalize(xy_n):
-    return (xy_n + 1.0) / 2.0 * XY_MAX
-
-def evaluate_episode(ep: int):
+def norm_state_tensor(xy_np, device):
     """
-    在单进程中跑 1 个 episode，并保存视频到 SAVE_DIR/ep_{ep:02d}.mp4
-    返回 (ep, success_flag)
+    将 numpy.ndarray 的 [x,y] 先转为 Tensor，再归一化到 [-1,1]
     """
-    # 1) 模型加载
+    st = torch.tensor(xy_np, dtype=torch.float32, device=device)
+    return (st / XY_MAX) * 2.0 - 1.0
+
+def run(ep):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    policy = ResNetStateFusionTrans(chunk_size=CHUNK_SIZE).to(device)
-    policy.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-    policy.eval()
+    net = ResNetStateFusionTrans(chunk_size=CHUNK).to(device)
+    net.load_state_dict(torch.load(MODEL, map_location=device))
+    net.eval()
 
-    # 2) 图像预处理
-    to_tensor = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.485,0.456,0.406),(0.229,0.224,0.225))
-    ])
-
-    # 3) 环境
-    raw = gym.make("gym_pusht/PushT-v0",
-                   obs_type="pixels_agent_pos",
-                   render_mode="rgb_array").unwrapped
-    env = TimeLimit(raw, max_episode_steps=1500)
-    env.success_threshold = 0.70
-
-    # 4) 评测循环
+    env = TimeLimit(
+        gym.make("gym_pusht/PushT-v0",
+                 obs_type="pixels_agent_pos",
+                 render_mode="rgb_array").unwrapped,
+        max_episode_steps=1500
+    )
     obs, _ = env.reset()
     frames = []
     done = trunc = False
-    step = 0
 
     while not (done or trunc):
-        # 4.1 取 obs 图像 & state
+        # 1) 图像
         img = to_tensor(obs["pixels"]).unsqueeze(0).to(device)
-        st_raw = torch.tensor(obs["agent_pos"],
-                              dtype=torch.float32,
-                              device=device)
-        st = normalize(st_raw).unsqueeze(0)
+        # 2) state: numpy -> tensor -> normalize -> (1,2)
+        st = norm_state_tensor(obs["agent_pos"], device).unsqueeze(0)
 
-        # 4.2 模型预测 chunk_size 步动作
+        # 3) forward
         with torch.no_grad():
-            act_seq_n = policy(img, st).cpu().numpy()[0]  # (CHUNK_SIZE, 2)
+            logits = net(img, st)         # (1, k, 2, 512)
+            acts_i = logits.argmax(-1)[0] # (k,2) long
 
-        # 4.3 依次执行 chunk 中的每一步
-        for act_n in act_seq_n:
-            step += 1
-            action = denormalize(act_n).astype(np.float32)  # (2,)
-            obs, _, done, trunc, info = env.step(action)
+        # 4) 执行动作 chunk
+        for a in acts_i.cpu().numpy():
+            obs, _, done, trunc, _ = env.step(a.astype(float))
             frames.append(env.render())
-            # 按 10Hz 节奏补足时长
-
             if done or trunc:
                 break
 
-    # 5) 保存视频
-    video_path = SAVE_DIR / f"ep_{ep:02d}.mp4"
-    iio.imwrite(video_path, frames, fps=int(1/CTRL_PERIOD))
-
+    # 存视频
+    SAVE.mkdir(exist_ok=True)
+    iio.imwrite(SAVE / f"ep_{ep:02d}.mp4", frames, fps=10)
     env.close()
-    return ep, int(info.get("is_success", False))
-
+    return int(done)
 
 if __name__ == "__main__":
-    # 评测前清空输出文件夹
-    if SAVE_DIR.exists():
-        shutil.rmtree(SAVE_DIR)
-    SAVE_DIR.mkdir(exist_ok=True)
+    # 清空旧结果
+    shutil.rmtree(SAVE, ignore_errors=True)
 
-    # 并行执行 N_EP episodes
-    success = 0
-    with ProcessPoolExecutor() as executor:
-        futures = {executor.submit(evaluate_episode, ep): ep for ep in range(N_EP)}
-        for future in as_completed(futures):
-            ep, succ = future.result()
-            success += succ
-            print(f"ep {ep:02d}: success={bool(succ)}")
-
-    print(f"\nOverall Success rate: {success}/{N_EP} = {success/N_EP:.2%}")
+    succ = 0
+    with ProcessPoolExecutor() as pool:
+        futures = [pool.submit(run, i) for i in range(N_EP)]
+        for f in as_completed(futures):
+            succ += f.result()
+    print(f"Success {succ}/{N_EP} = {succ/N_EP:.2%}")
