@@ -1,0 +1,6 @@
+**/bc_experiments/**/eval_videos/
+**/bc_experiments/**/lerobot_pusht/
+
+*.pth
+
+*.safetensors
